@@ -13,10 +13,14 @@ import android.os.Looper
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.media3.ui.PlayerView
 import com.facebook.react.bridge.ReactContext
@@ -33,7 +37,12 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
 
     private var player: MediastreamPlayer? = null
     private var playerInitialized = false
-    private var transitionCover: View? = null
+    var isFullscreen = false
+
+    // The actual player lives here, in the decorView — outside the RN view tree.
+    // MediastreamPlayerView is just a transparent placeholder that reserves space
+    // and provides positioning info.
+    private var overlayContainer: FrameLayout? = null
 
     // Props set by the ViewManager before attach
     var accountID: String? = null
@@ -46,32 +55,81 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
     var dvr: Boolean = false
     var adURL: String? = null
 
-    // The SDK adds/re-adds its player views as children during orientation changes;
-    // those views may still have a parent, so we detach them first.
-    override fun addView(child: View, index: Int, params: ViewGroup.LayoutParams) {
-        (child.parent as? ViewGroup)?.removeView(child)
-        super.addView(child, index, params)
+    private val scrollListener = ViewTreeObserver.OnScrollChangedListener {
+        if (!isFullscreen) syncOverlayToPlaceholder()
     }
 
-    // React Native bypasses Android's layout system; force re-measure when the SDK
-    // adds child views (ExoPlayer surface) so they get proper dimensions.
-    private val measureAndLayout = Runnable {
-        measure(
-            MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
-            MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
-        )
-        layout(left, top, right, bottom)
-    }
-
-    override fun requestLayout() {
-        super.requestLayout()
-        post(measureAndLayout)
+    // Sync overlay position whenever this placeholder lays out (resize, first layout, etc.)
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        super.onLayout(changed, l, t, r, b)
+        if (!isFullscreen) syncOverlayToPlaceholder()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         activeInstance = this
+        viewTreeObserver.addOnScrollChangedListener(scrollListener)
+        if (overlayContainer == null) createOverlay()
         initPlayer()
+    }
+
+    private fun createOverlay() {
+        val decorView = reactContext.currentActivity?.window?.decorView as? ViewGroup ?: return
+
+        // The overlay FrameLayout mirrors the SDK-container responsibilities that
+        // MediastreamPlayerView used to hold directly.
+        val overlay = object : FrameLayout(context) {
+            private val measureAndLayout = Runnable {
+                measure(
+                    MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+                )
+                layout(left, top, right, bottom)
+            }
+
+            // SDK re-adds its views during orientation changes; detach first to avoid
+            // "child already has a parent" crashes.
+            override fun addView(child: View, index: Int, params: ViewGroup.LayoutParams) {
+                (child.parent as? ViewGroup)?.removeView(child)
+                super.addView(child, index, params)
+            }
+
+            // RN bypasses Android layout; force re-measure when SDK adds child views.
+            override fun requestLayout() {
+                super.requestLayout()
+                post(measureAndLayout)
+            }
+        }
+
+        // Start at a 1×1 placeholder — syncOverlayToPlaceholder() will size it correctly
+        // once this view completes its first layout pass.
+        val lp = FrameLayout.LayoutParams(1, 1).apply {
+            gravity = Gravity.TOP or Gravity.START
+        }
+        decorView.addView(overlay, lp)
+        // Ensure the overlay sits above the ReactRootView.
+        overlay.elevation = 1f
+        overlayContainer = overlay
+        syncOverlayToPlaceholder()
+    }
+
+    // Resize and reposition the overlay to exactly match this placeholder view.
+    private fun syncOverlayToPlaceholder() {
+        val overlay = overlayContainer ?: return
+        if (width == 0 || height == 0) return
+
+        val loc = IntArray(2)
+        getLocationInWindow(loc)
+
+        val lp = overlay.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (lp.leftMargin == loc[0] && lp.topMargin == loc[1]
+            && lp.width == width && lp.height == height) return
+
+        lp.leftMargin = loc[0]
+        lp.topMargin = loc[1]
+        lp.width = width
+        lp.height = height
+        overlay.layoutParams = lp
     }
 
     fun initPlayer() {
@@ -79,8 +137,10 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
         val id = mediaId ?: run { Log.d(TAG, "initPlayer: mediaId not set yet"); return }
         val activity = reactContext.currentActivity as? FragmentActivity
             ?: run { Log.e(TAG, "initPlayer: currentActivity is null or not FragmentActivity"); return }
+        val overlay = overlayContainer
+            ?: run { Log.d(TAG, "initPlayer: overlay not ready yet, will retry on attach"); return }
 
-        Log.d(TAG, "initPlayer: starting id=$id size=${width}x${height}")
+        Log.d(TAG, "initPlayer: starting id=$id")
         playerInitialized = true
 
         val config = MediastreamPlayerConfig().apply {
@@ -98,14 +158,40 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
             dvr = this@MediastreamPlayerView.dvr
             adURL = this@MediastreamPlayerView.adURL
             appHandlesWindowInsets = true
+            // TextureView so that View transforms (rotation/scale) work on the video surface.
+            customPlayerView = LayoutInflater.from(context)
+                .inflate(R.layout.ms_player_texture, null) as androidx.media3.ui.PlayerView
+            // Bypass the SDK's fullscreen Dialog: player stays in our overlay and we
+            // simulate landscape with transforms — zero requestedOrientation change,
+            // zero RN re-renders.
+            onFullscreenOnClick = java.util.function.Consumer { _ ->
+                enterFakeFullscreen()
+                sendEvent("onFullscreen", null)
+            }
+            onFullscreenOffClick = java.util.function.Consumer { _ ->
+                exitFakeFullscreen()
+                sendEvent("onExitFullscreen", null)
+            }
         }
 
-        Log.d(TAG, "initPlayer: creating MediastreamPlayer")
+        // The SDK sets msplayerView = customPlayerView but does NOT add it to the container
+        // when customPlayerView is provided — we must add it ourselves.
+        val customView = config.customPlayerView
+        if (customView != null) {
+            overlay.addView(
+                customView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+
         player = MediastreamPlayer(
             context,
             config,
-            this,
-            this,
+            overlay,
+            overlay,
             activity.supportFragmentManager
         ).also { p ->
             p.addPlayerCallback(createCallback())
@@ -113,42 +199,88 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
         }
     }
 
-    // Called by MainActivity.onConfigurationChanged — mirrors the native sample pattern.
-    fun handleConfigChange(newConfig: Configuration) {
-        if (player?.isOnFullscreen == true && newConfig.orientation == Configuration.ORIENTATION_PORTRAIT) {
-            player?.exitFullscreen()
-        }
-        reapplyLayout()
-        // Display is now portrait and RN is re-rendering — remove cover after one
-        // layout pass so the user never sees the intermediate state.
-        if (newConfig.orientation == Configuration.ORIENTATION_PORTRAIT) {
-            postDelayed({ hideTransitionCover() }, 150)
-        }
-    }
-
-    // After fullscreen exit the SDK restores the player view to our container but its
-    // LayoutParams may be stale. Bring the view to front and ensure MATCH_PARENT fill.
-    private fun reapplyLayout() {
-        requestLayout()
-        post {
-            if (childCount > 0) {
-                val playerView = getChildAt(childCount - 1)
-                playerView.bringToFront()
-                (playerView.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                    lp.gravity = Gravity.TOP or Gravity.START
-                    lp.width = LayoutParams.MATCH_PARENT
-                    lp.height = LayoutParams.MATCH_PARENT
-                    playerView.layoutParams = lp
-                }
-            }
-        }
-    }
+    // Called by MainActivity.onConfigurationChanged — no-op in fake-fullscreen mode
+    // since we never change requestedOrientation.
+    fun handleConfigChange(newConfig: Configuration) {}
 
     // Imperative commands from JS
     fun play() { player?.play() }
     fun pause() { player?.pause() }
     fun seekTo(seconds: Double) { player?.seekTo((seconds * 1000).toLong()) }
     fun setVolumeLevel(vol: Double) { player?.setSessionVolume(vol.toFloat()) }
+
+    private fun enterFakeFullscreen() {
+        if (isFullscreen) return
+        isFullscreen = true
+        val activity = reactContext.currentActivity ?: return
+        val overlay = overlayContainer ?: return
+        val decorView = activity.window.decorView as? ViewGroup ?: return
+        val dm = resources.displayMetrics
+        val screenW = dm.widthPixels
+        val screenH = dm.heightPixels
+
+        // Give the overlay landscape dimensions centered in the portrait screen.
+        // leftMargin is negative (extends off-screen left/right) — that's intentional.
+        // After -90° rotation the landscape rectangle fills the portrait screen exactly,
+        // with no non-uniform scale, so Media3 sees a landscape container and renders
+        // the video without any distortion.
+        val lp = overlay.layoutParams as? FrameLayout.LayoutParams ?: return
+        lp.width = screenH
+        lp.height = screenW
+        lp.leftMargin = (screenW - screenH) / 2   // negative
+        lp.topMargin  = (screenH - screenW) / 2
+        overlay.layoutParams = lp
+        overlay.bringToFront()
+        overlay.elevation = 100f
+
+        // Allow the overlay to render its off-screen portions before rotation.
+        decorView.clipChildren = false
+        decorView.clipToPadding = false
+
+        WindowInsetsControllerCompat(activity.window, overlay).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        // Lock portrait so a physical tilt doesn't also rotate the Activity.
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+
+        overlay.post {
+            // Pivot at overlay center — rotate the whole landscape container -90°, no scale.
+            overlay.pivotX = screenH / 2f
+            overlay.pivotY = screenW / 2f
+            overlay.animate()
+                .rotation(90f)
+                .setDuration(250)
+                .start()
+        }
+    }
+
+    private fun exitFakeFullscreen() {
+        if (!isFullscreen) return
+        isFullscreen = false
+        val activity = reactContext.currentActivity ?: return
+        val overlay = overlayContainer ?: return
+        val decorView = activity.window.decorView as? ViewGroup
+
+        WindowInsetsControllerCompat(activity.window, overlay).show(WindowInsetsCompat.Type.systemBars())
+
+        overlay.animate()
+            .rotation(0f)
+            .setDuration(250)
+            .withEndAction {
+                overlay.elevation = 1f
+                decorView?.clipChildren = true
+                decorView?.clipToPadding = true
+                syncOverlayToPlaceholder()
+                // Force portrait so the device snaps back even if physically tilted,
+                // then unlock after a short delay so the rest of the app rotates freely.
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                mainHandler.postDelayed({
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }, 500)
+            }
+            .start()
+    }
 
     private fun createCallback() = object : MediastreamPlayerCallback {
 
@@ -175,16 +307,12 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
 
         override fun onFullscreen(enteredForPip: Boolean) {
             if (enteredForPip) return
-            reactContext.currentActivity?.requestedOrientation =
-                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            enterFakeFullscreen()
             sendEvent("onFullscreen", null)
         }
 
         override fun offFullscreen() {
-            showTransitionCover()
-            reactContext.currentActivity?.requestedOrientation =
-                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            reapplyLayout()
+            exitFakeFullscreen()
             sendEvent("onExitFullscreen", null)
         }
 
@@ -217,7 +345,12 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        hideTransitionCover()
+        if (viewTreeObserver.isAlive) {
+            viewTreeObserver.removeOnScrollChangedListener(scrollListener)
+        }
+        val decorView = reactContext.currentActivity?.window?.decorView as? ViewGroup
+        overlayContainer?.let { decorView?.removeView(it) }
+        overlayContainer = null
         if (activeInstance === this) activeInstance = null
         mainHandler.postDelayed({
             if (!isAttachedToWindow) {
@@ -226,25 +359,6 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
                 playerInitialized = false
             }
         }, 300)
-    }
-
-    private fun showTransitionCover() {
-        if (transitionCover != null) return
-        val decorView = reactContext.currentActivity?.window?.decorView as? ViewGroup ?: return
-        transitionCover = View(context).apply {
-            setBackgroundColor(Color.BLACK)
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
-        decorView.addView(transitionCover)
-    }
-
-    private fun hideTransitionCover() {
-        val decorView = reactContext.currentActivity?.window?.decorView as? ViewGroup ?: return
-        transitionCover?.let { decorView.removeView(it) }
-        transitionCover = null
     }
 
     private fun buildHelloOverlay(): View {
