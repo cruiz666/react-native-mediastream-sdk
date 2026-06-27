@@ -1,4 +1,4 @@
-export type VideoType = 'VOD' | 'LIVE' | 'EPISODE';
+export type VideoType = 'VOD' | 'LIVE' | 'EPISODE' | 'VERTICAL';
 
 export interface MediastreamPlayerProps {
   // Required
@@ -12,7 +12,21 @@ export interface MediastreamPlayerProps {
   volume?: number;      // 0.0 – 1.0
   showControls?: boolean;
   dvr?: boolean;
+  playerId?: string;
   adURL?: string;
+  accessToken?: string;
+  environment?: string;
+  customUI?: boolean;
+  isDebug?: boolean;
+  trackEnable?: boolean;
+  customPlaylistOrigin?: {
+    baseUrl: string;
+    headers?: Record<string, string>;
+    startFromMediaId?: string;
+  };
+
+  // iOS-only prop for refreshFrom (command dispatch unreliable in RN 0.73 iOS)
+  pendingRefreshId?: string;
 
   style?: object;
 
@@ -26,6 +40,11 @@ export interface MediastreamPlayerProps {
   onFullscreen?: () => void;
   onExitFullscreen?: () => void;
   onAdEvent?: (event: {nativeEvent: {type: string}}) => void;
+  onEpisodeInfoClick?: (event: {nativeEvent: {order: number; id?: string; [key: string]: unknown}}) => void;
+  onLockedEpisode?: (event: {nativeEvent: {episodeId: string}}) => void;
+  onSwipeToItem?: (event: {nativeEvent: {itemId: string}}) => void;
+  onEndReached?: () => void;
+  onDismissButton?: () => void;
 }
 
 export interface MediastreamPlayerCommands {
@@ -33,4 +52,5 @@ export interface MediastreamPlayerCommands {
   pause(): void;
   seekTo(seconds: number): void;
   setVolume(volume: number): void;
+  refreshFrom(mediaId: string): void;
 }

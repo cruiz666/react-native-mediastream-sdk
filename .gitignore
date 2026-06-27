@@ -23,6 +23,7 @@ ios/.xcode.env.local
 # Android/IntelliJ
 build/
 android/app/libs/*.aar
+android/local-sdk/
 .idea
 .gradle
 local.properties

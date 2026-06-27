@@ -47,13 +47,21 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
     // Props set by the ViewManager before attach
     var accountID: String? = null
     var mediaId: String? = null
+    var playerId: String? = null
     var mediaType: String = "VOD"
     var autoplay: Boolean = true
     var startAt: Int = -1
     var volume: Float = -1f
     var showControls: Boolean = true
     var dvr: Boolean = false
+    var isDebug: Boolean = false
+    var trackEnable: Boolean = true
+    var customPlaylistBaseUrl: String? = null
+    var customPlaylistStartFromMediaId: String? = null
+    var customPlaylistHeaders: Map<String, String>? = null
     var adURL: String? = null
+    var accessToken: String? = null
+    var environment: String? = null
 
     private val scrollListener = ViewTreeObserver.OnScrollChangedListener {
         if (!isFullscreen) syncOverlayToPlaceholder()
@@ -146,31 +154,48 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
         val config = MediastreamPlayerConfig().apply {
             accountID?.let { this.accountID = it }
             this.id = id
+            this@MediastreamPlayerView.playerId?.let { this.playerId = it }
             type = when (mediaType.uppercase()) {
-                "LIVE"    -> MediastreamPlayerConfig.VideoTypes.LIVE
-                "EPISODE" -> MediastreamPlayerConfig.VideoTypes.EPISODE
-                else      -> MediastreamPlayerConfig.VideoTypes.VOD
+                "LIVE"     -> MediastreamPlayerConfig.VideoTypes.LIVE
+                "EPISODE"  -> MediastreamPlayerConfig.VideoTypes.EPISODE
+                "VERTICAL" -> MediastreamPlayerConfig.VideoTypes.VERTICAL
+                else       -> MediastreamPlayerConfig.VideoTypes.VOD
             }
             autoplay = this@MediastreamPlayerView.autoplay
             if (this@MediastreamPlayerView.startAt >= 0) startAt = this@MediastreamPlayerView.startAt
             if (this@MediastreamPlayerView.volume >= 0f) volume = this@MediastreamPlayerView.volume * 100f
             showControls = this@MediastreamPlayerView.showControls
             dvr = this@MediastreamPlayerView.dvr
-            adURL = this@MediastreamPlayerView.adURL
-            appHandlesWindowInsets = true
-            // TextureView so that View transforms (rotation/scale) work on the video surface.
-            customPlayerView = LayoutInflater.from(context)
-                .inflate(R.layout.ms_player_texture, null) as androidx.media3.ui.PlayerView
-            // Bypass the SDK's fullscreen Dialog: player stays in our overlay and we
-            // simulate landscape with transforms — zero requestedOrientation change,
-            // zero RN re-renders.
-            onFullscreenOnClick = java.util.function.Consumer { _ ->
-                enterFakeFullscreen()
-                sendEvent("onFullscreen", null)
+            isDebug = this@MediastreamPlayerView.isDebug
+            trackEnable = this@MediastreamPlayerView.trackEnable
+            this@MediastreamPlayerView.customPlaylistBaseUrl?.let { baseUrl ->
+                customPlaylistOrigin = MediastreamPlayerConfig.CustomPlaylistOrigin(
+                    baseUrl = baseUrl,
+                    headers = this@MediastreamPlayerView.customPlaylistHeaders ?: emptyMap(),
+                    startFromMediaId = this@MediastreamPlayerView.customPlaylistStartFromMediaId
+                )
             }
-            onFullscreenOffClick = java.util.function.Consumer { _ ->
-                exitFakeFullscreen()
-                sendEvent("onExitFullscreen", null)
+            adURL = this@MediastreamPlayerView.adURL
+            this@MediastreamPlayerView.accessToken?.let { accessToken = it }
+            this@MediastreamPlayerView.environment?.let {
+                environment = if (it.uppercase() == "DEV") MediastreamPlayerConfig.Environment.DEV
+                              else MediastreamPlayerConfig.Environment.PRODUCTION
+            }
+            // VERTICAL mode manages its own ViewPager with per-episode players — do NOT
+            // provide customPlayerView (it would be reused across all episodes, breaking
+            // navigation) and do NOT intercept fullscreen clicks (not applicable).
+            if (mediaType.uppercase() != "VERTICAL") {
+                appHandlesWindowInsets = true
+                customPlayerView = LayoutInflater.from(context)
+                    .inflate(R.layout.ms_player_texture, null) as androidx.media3.ui.PlayerView
+                onFullscreenOnClick = java.util.function.Consumer { _ ->
+                    enterFakeFullscreen()
+                    sendEvent("onFullscreen", null)
+                }
+                onFullscreenOffClick = java.util.function.Consumer { _ ->
+                    exitFakeFullscreen()
+                    sendEvent("onExitFullscreen", null)
+                }
             }
         }
 
@@ -208,6 +233,12 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
     fun pause() { player?.pause() }
     fun seekTo(seconds: Double) { player?.seekTo((seconds * 1000).toLong()) }
     fun setVolumeLevel(vol: Double) { player?.setSessionVolume(vol.toFloat()) }
+    fun refreshFrom(mediaId: String) {
+        Log.d(TAG, "refreshFrom: $mediaId")
+        player?.refreshFrom(mediaId)
+        // SDK loads the new episode but doesn't autoplay — trigger play after it settles.
+        mainHandler.postDelayed({ player?.play() }, 800)
+    }
 
     private fun enterFakeFullscreen() {
         if (isFullscreen) return
@@ -306,18 +337,27 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
         override fun nextEpisodeLoadRequested(url: String) {}
 
         override fun onFullscreen(enteredForPip: Boolean) {
-            if (enteredForPip) return
+            if (enteredForPip || mediaType.uppercase() == "VERTICAL") return
             enterFakeFullscreen()
             sendEvent("onFullscreen", null)
         }
 
         override fun offFullscreen() {
+            if (mediaType.uppercase() == "VERTICAL") return
             exitFakeFullscreen()
             sendEvent("onExitFullscreen", null)
         }
 
         override fun onNewSourceAdded(config: MediastreamPlayerConfig) {}
         override fun onLocalSourceAdded() {}
+
+        override fun onEpisodeInfoClick(id: String, order: Int) {
+            val map = WritableNativeMap().apply {
+                putString("id", id)
+                putInt("order", order)
+            }
+            sendEvent("onEpisodeInfoClick", map)
+        }
 
         override fun onAdEvents(type: AdEvent.AdEventType) {
             val map = WritableNativeMap().apply { putString("type", type.name) }
@@ -339,7 +379,16 @@ class MediastreamPlayerView(context: Context) : FrameLayout(context) {
         override fun onPlaybackErrors(error: JSONObject?) {}
         override fun onEmbedErrors(error: JSONObject?) {}
         override fun onLiveAudioCurrentSongChanged(data: JSONObject?) {}
-        override fun onDismissButton() {}
+        override fun onDismissButton() { sendEvent("onDismissButton", null) }
+        override fun onLockedEpisode(id: String) {
+            val map = WritableNativeMap().apply { putString("episodeId", id) }
+            sendEvent("onLockedEpisode", map)
+        }
+        override fun onSwipeToItem(currentId: String) {
+            val map = WritableNativeMap().apply { putString("itemId", currentId) }
+            sendEvent("onSwipeToItem", map)
+        }
+        override fun onEndReached() { sendEvent("onEndReached", null) }
         override fun onPlayerReload() {}
     }
 
