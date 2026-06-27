@@ -70,7 +70,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
 
     // Mediastream Platform SDK
-    implementation("io.github.mediastream:mediastreamplatformsdkandroid:10.0.4-alpha06")
+    implementation("io.github.mediastream:mediastreamplatformsdkandroid:11.0.0-qa02")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }

@@ -23,6 +23,7 @@ ios/.xcode.env.local
 # Android/IntelliJ
 build/
 android/app/libs/*.aar
+android/local-sdk/
 .idea
 .gradle
 local.properties
@@ -49,6 +50,10 @@ yarn-error.log
 # Ruby / CocoaPods
 /ios/Pods/
 /vendor/bundle/
+
+# Accidental SDK extraction artifacts (Android SDK AAR contents)
+META-INF/
+am/
 
 # Temporary files created by Metro to check the health of the file watcher
 .metro-health-check*

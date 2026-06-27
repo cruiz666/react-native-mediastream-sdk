@@ -1,6 +1,6 @@
-import React, {forwardRef, useImperativeHandle, useRef, useCallback} from 'react';
-import {StatusBar, UIManager, findNodeHandle} from 'react-native';
-import {MediastreamPlayerViewNative, PlayerCommands} from '../native/MediastreamPlayerNative';
+import React, {forwardRef, useImperativeHandle, useRef, useCallback, useState} from 'react';
+import {Platform, StatusBar, UIManager, findNodeHandle} from 'react-native';
+import {MediastreamPlayerViewNative, PlayerCommands, PlayerCommandIdsIOS} from '../native/MediastreamPlayerNative';
 import type {MediastreamPlayerProps, MediastreamPlayerCommands} from '../native/types';
 
 type Props = MediastreamPlayerProps & {
@@ -11,11 +11,20 @@ export const MediastreamPlayer = forwardRef<MediastreamPlayerCommands, Props>(
   (props, ref) => {
     const {onFullscreen: onFullscreenProp, onExitFullscreen: onExitFullscreenProp, style, ...rest} = props;
     const nativeRef = useRef<any>(null);
+    const [pendingRefreshId, setPendingRefreshId] = useState<string | undefined>(undefined);
 
     function dispatchCommand(command: string, args: unknown[] = []) {
       const node = findNodeHandle(nativeRef.current);
+      // iOS Old Architecture: UIManager introspection doesn't reliably expose
+      // commandsMap in RN 0.73, so we use a static numeric map kept in sync
+      // with MediastreamPlayerViewManager.m commandsMap.
+      const commandId: string | number =
+        Platform.OS === 'ios' ? (PlayerCommandIdsIOS[command] ?? command) : command;
+      console.log(`[MSBridge] dispatchCommand command=${command} commandId=${commandId} node=${node}`);
       if (node) {
-        UIManager.dispatchViewManagerCommand(node, command, args);
+        UIManager.dispatchViewManagerCommand(node, commandId as any, args);
+      } else {
+        console.warn('[MSBridge] dispatchCommand — node is null, ref not mounted?');
       }
     }
 
@@ -24,6 +33,14 @@ export const MediastreamPlayer = forwardRef<MediastreamPlayerCommands, Props>(
       pause: () => dispatchCommand(PlayerCommands.pause),
       seekTo: (seconds: number) => dispatchCommand(PlayerCommands.seekTo, [seconds]),
       setVolume: (volume: number) => dispatchCommand(PlayerCommands.setVolume, [volume]),
+      refreshFrom: (mediaId: string) => {
+        if (Platform.OS === 'ios') {
+          // iOS: use prop-based trigger; append nonce so same ID re-triggers
+          setPendingRefreshId(`${mediaId}|${Date.now()}`);
+        } else {
+          dispatchCommand(PlayerCommands.refreshFrom, [mediaId]);
+        }
+      },
     }));
 
     const handleFullscreen = useCallback(() => {
@@ -46,6 +63,7 @@ export const MediastreamPlayer = forwardRef<MediastreamPlayerCommands, Props>(
         style={style}
         onFullscreen={handleFullscreen}
         onExitFullscreen={handleExitFullscreen}
+        pendingRefreshId={pendingRefreshId}
         {...rest}
       />
     );

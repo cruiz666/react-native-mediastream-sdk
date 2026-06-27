@@ -17,26 +17,16 @@ prepare_react_native_project!
 #   dependencies: {
 #     ...(process.env.NO_FLIPPER ? { 'react-native-flipper': { platforms: { ios: null } } } : {}),
 # ```
-flipper_config = ENV['NO_FLIPPER'] == "1" ? FlipperConfiguration.disabled : FlipperConfiguration.enabled
-
-linkage = ENV['USE_FRAMEWORKS']
-if linkage != nil
-  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
-  use_frameworks! :linkage => linkage.to_sym
-end
+use_frameworks! :linkage => :static
 
 target 'MediastreamApp' do
   config = use_native_modules!
 
-  pod 'MediastreamPlatformSDKxC', '~> 3.0.0'
+  pod 'MediastreamPlatformSDKxC', '5.0.0-qa.02'
 
   use_react_native!(
     :path => config[:reactNativePath],
-    # Enables Flipper.
-    #
-    # Note that if you have use_frameworks! enabled, Flipper will not work and
-    # you should disable the next line.
-    :flipper_configuration => flipper_config,
+    :flipper_configuration => FlipperConfiguration.disabled,
     # An absolute path to your application root.
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
@@ -47,6 +37,62 @@ target 'MediastreamApp' do
   end
 
   post_install do |installer|
+    # YouboraAVPlayerAdapter and YouboraLib must be dynamic because the precompiled
+    # MediastreamPlatformSDKiOS.xcframework links against them via @rpath at runtime.
+    # With use_frameworks! :linkage => :static they would be static archives — dyld
+    # cannot resolve @rpath against a static archive.
+    dynamic_pods = ['YouboraAVPlayerAdapter', 'YouboraLib']
+    installer.pods_project.targets.each do |target|
+      next unless dynamic_pods.include?(target.name)
+      target.build_configurations.each do |cfg|
+        cfg.build_settings['MACH_O_TYPE'] = 'mh_dylib'
+        # Build to the shared pods output dir (not the per-pod subdirectory) so that:
+        #   • The simulator finds it via DYLD_FRAMEWORK_PATH
+        #   • The embed script finds it via BUILT_PRODUCTS_DIR
+        cfg.build_settings['CONFIGURATION_BUILD_DIR'] = '$(PODS_CONFIGURATION_BUILD_DIR)'
+        # The xcconfig for YouboraAVPlayerAdapter looks for YouboraLib in the per-pod
+        # subdirectory (${PODS_CONFIGURATION_BUILD_DIR}/YouboraLib/). Since we moved both
+        # to the flat dir, add it explicitly so the linker finds YouboraLib.framework.
+        if target.name == 'YouboraAVPlayerAdapter'
+          cfg.build_settings['FRAMEWORK_SEARCH_PATHS'] = ['$(inherited)', '$(PODS_CONFIGURATION_BUILD_DIR)']
+        end
+      end
+    end
+
+    # Inject install_framework calls at the END of the CocoaPods-generated embed script
+    # so the dynamic Youbora frameworks are copied into the app bundle (required on device).
+    # We append to the file rather than doing a string substitution to avoid accidentally
+    # matching the same marker string that appears inside the code_sign_if_enabled function.
+    frameworks_script = "#{installer.sandbox.root}/Target Support Files/Pods-MediastreamApp/Pods-MediastreamApp-frameworks.sh"
+    if File.exist?(frameworks_script)
+      content = File.read(frameworks_script)
+      unless content.include?('YouboraAVPlayerAdapter')
+        File.open(frameworks_script, 'a') do |f|
+          dynamic_pods.each { |fw| f.puts "install_framework \"${PODS_CONFIGURATION_BUILD_DIR}/#{fw}.framework\"" }
+        end
+      end
+    end
+
+    # Keep Xcode's dependency tracking consistent for the embed phase.
+    dynamic_pods.each do |fw|
+      %w[Debug Release].each do |cfg_name|
+        base = "#{installer.sandbox.root}/Target Support Files/Pods-MediastreamApp/Pods-MediastreamApp-frameworks-#{cfg_name}"
+        {
+          "#{base}-input-files.xcfilelist"  => "${PODS_CONFIGURATION_BUILD_DIR}/#{fw}.framework/#{fw}",
+          "#{base}-output-files.xcfilelist" => "${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/#{fw}.framework",
+        }.each do |path, line|
+          next unless File.exist?(path)
+          existing = File.read(path)
+          unless existing.include?(line)
+            File.open(path, 'a') do |f|
+              f.print "\n" unless existing.end_with?("\n")
+              f.puts line
+            end
+          end
+        end
+      end
+    end
+
     # https://github.com/facebook/react-native/blob/main/packages/react-native/scripts/react_native_pods.rb#L197-L202
     react_native_post_install(
       installer,

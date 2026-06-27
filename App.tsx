@@ -1,61 +1,30 @@
-import React, {useRef} from 'react';
-import {
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  useWindowDimensions,
-} from 'react-native';
-import {SafeAreaView} from 'react-native-safe-area-context';
-import {MediastreamPlayer} from './src/components/MediastreamPlayer';
-import {DummyContent} from './src/components/DummyContent';
-import type {MediastreamPlayerCommands} from './src/native/types';
+import React, {useState, useEffect} from 'react';
+import {BackHandler} from 'react-native';
+import {HomeScreen} from './src/screens/HomeScreen';
+import {SmallContainerScreen} from './src/screens/SmallContainerScreen';
+import {MicroDramasScreen} from './src/screens/MicroDramasScreen';
 
-const MEDIA_ID = '69e40fa9d0cf9540a9c76b56';
+type Screen = 'home' | 'small-container' | 'micro-dramas';
 
 export default function App() {
-  const playerRef = useRef<MediastreamPlayerCommands>(null);
-  const {width} = useWindowDimensions();
-  const playerHeight = Math.round(width * (9 / 16));
+  const [screen, setScreen] = useState<Screen>('home');
 
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor="#000" />
-      <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        bounces={false}
-        showsVerticalScrollIndicator={false}>
-        <MediastreamPlayer
-          ref={playerRef}
-          style={{width, height: playerHeight}}
-          id={MEDIA_ID}
-          type="VOD"
-          autoplay={true}
-          showControls={true}
-          onPlayerReady={() => console.log('[Mediastream] Player ready')}
-          onPlay={() => console.log('[Mediastream] Playing')}
-          onPause={() => console.log('[Mediastream] Paused')}
-          onEnd={() => console.log('[Mediastream] Ended')}
-          onBuffering={() => console.log('[Mediastream] Buffering')}
-          onError={e => console.warn('[Mediastream] Error:', e.nativeEvent.error)}
-          onAdEvent={e => console.log('[Mediastream] Ad event:', e.nativeEvent.type)}
-        />
-        <DummyContent />
-      </ScrollView>
-    </SafeAreaView>
-  );
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (screen !== 'home') {
+        setScreen('home');
+        return true; // consumido — no cierra la app
+      }
+      return false; // deja que Android cierre la app normalmente
+    });
+    return () => sub.remove();
+  }, [screen]);
+
+  if (screen === 'small-container') {
+    return <SmallContainerScreen onBack={() => setScreen('home')} />;
+  }
+  if (screen === 'micro-dramas') {
+    return <MicroDramasScreen onBack={() => setScreen('home')} />;
+  }
+  return <HomeScreen onNavigate={s => setScreen(s)} />;
 }
-
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  scrollView: {
-    flex: 1,
-    backgroundColor: '#0F0F1A',
-  },
-  scrollContent: {
-    flexGrow: 1,
-  },
-});
