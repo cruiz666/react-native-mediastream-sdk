@@ -22,7 +22,7 @@ use_frameworks! :linkage => :static
 target 'MediastreamApp' do
   config = use_native_modules!
 
-  pod 'MediastreamPlatformSDKxC', '5.0.0-qa.01'
+  pod 'MediastreamPlatformSDKxC', '5.0.0-qa.02'
 
   use_react_native!(
     :path => config[:reactNativePath],
